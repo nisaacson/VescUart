@@ -42,6 +42,23 @@ class VescUart
         uint8_t minor;
     };
 
+    /** Struct to hold the McConf values to send over UART */
+    struct McConfPackage(){
+        float currentMin;
+        float currentMax;
+        float erpmMin;
+        float erpmMax;
+        float dutyMin;
+        float dutyMax;
+        float wattMin;
+        float wattMax;
+        float inCurrentMin;
+        float inCurrentMax;
+        int motorPoles;
+        float gearRatio;
+        float wheelDiameter;
+    }
+
 	//Timeout - specifies how long the function will wait for the vesc to respond
 	const uint32_t _TIMEOUT;
 
@@ -51,14 +68,17 @@ class VescUart
 		 */
 		VescUart(uint32_t timeout_ms = 100);
 
-		/** Variabel to hold measurements returned from VESC */
+		/** Variable to hold measurements returned from VESC */
 		dataPackage data; 
 
-		/** Variabel to hold nunchuck values */
+		/** Variable to hold nunchuck values */
 		nunchuckPackage nunchuck; 
 
        /** Variable to hold firmware version */
-        FWversionPackage fw_version; 
+        FWversionPackage fw_version;
+
+       /** Variable to hold McConf values */
+        McConfPackage mcconf;
 
         /**
          * @brief      Set the serial port for uart communication
@@ -183,10 +203,10 @@ class VescUart
 
 	private: 
 
-		/** Variabel to hold the reference to the Serial object to use for UART */
+		/** Variable to hold the reference to the Serial object to use for UART */
 		Stream* serialPort = NULL;
 
-		/** Variabel to hold the reference to the Serial object to use for debugging. 
+		/** Variable to hold the reference to the Serial object to use for debugging.
 		  * Uses the class Stream instead of HarwareSerial */
 		Stream* debugPort = NULL;
 

@@ -215,6 +215,24 @@ bool VescUart::processReadPacket(uint8_t * message) {
 
 			return true;
 
+        case COMM_GET_MCCONF_TEMP: // Structure defined here: https://github.com/vedderb/bldc/blob/6578a642d1997a9ccf215d41a6fe012fa2305af7/comm/commands.c#L1051
+            mcconf.currentMin 		= buffer_get_float32_auto(message, &index); 	// mcconf->l_current_min_scale
+            mcconf.currentMax 		= buffer_get_float32_auto(message, &index); 	// mcconf->l_current_max_scale
+            mcconf.erpmMin 		    = buffer_get_float32_auto(message, &index); 	// mcconf->l_min_erpm
+            mcconf.erpmMax 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_max_erpm
+            mcconf.dutyMin 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_min_duty
+            mcconf.dutyMax 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_max_duty
+            mcconf.wattMin 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_watt_min
+            mcconf.wattMax 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_watt_max
+            mcconf.inCurrentMin 	= buffer_get_float32_auto(message, &index); 	// mcconf->l_in_current_min
+            mcconf.inCurrentMax 	= buffer_get_float32_auto(message, &index); 	// mcconf->l_in_current_max
+
+            mcconf.motorPoles       = (uint8_t) message[index++];                   // mcconf->si_motor_poles
+            mcconf.gearRatio 	    = buffer_get_float32_auto(message, &index); 	// mcconf->si_gear_ratio
+            mcconf.wheelDiameter 	= buffer_get_float32_auto(message, &index); 	// mcconf->si_wheel_diameter
+
+            return true;
+
 		break;
 
 		/* case COMM_GET_VALUES_SELECTIVE:
@@ -318,6 +336,70 @@ void VescUart::setNunchuckValues(uint8_t canId) {
 		debugPort->print("x="); debugPort->print(nunchuck.valueX); debugPort->print(" y="); debugPort->print(nunchuck.valueY);
 		debugPort->print(" LBTN="); debugPort->print(nunchuck.lowerButton); debugPort->print(" UBTN="); debugPort->println(nunchuck.upperButton);
 	}
+
+	packSendPayload(payload, payloadSize);
+}
+bool VescUart::getMcConfValues(void) {
+	return getMcConfValues(0);
+}
+
+bool VescUart::getMcConfValues(uint8_t canId) {
+
+	if (debugPort!=NULL){
+		debugPort->println("Command: COMM_GET_MCCONF_TEMP "+String(canId));
+	}
+
+	int32_t index = 0;
+	int payloadSize = (canId == 0 ? 1 : 3);
+	uint8_t payload[payloadSize];
+	if (canId != 0) {
+		payload[index++] = { COMM_FORWARD_CAN };
+		payload[index++] = canId;
+	}
+	payload[index++] = { COMM_GET_MCCONF_TEMP };
+
+	packSendPayload(payload, payloadSize);
+
+	uint8_t message[256];
+	int messageLength = receiveUartMessage(message);
+
+	if (messageLength > 55) {
+		return processReadPacket(message);
+	}
+	return false;
+}
+void VescUart::setMcConfValues() {
+	return setMcConfValues(0);
+}
+
+void VescUart::setMcConfValues(uint8_t canId) {
+
+	if(debugPort!=NULL){
+		debugPort->println("Command: COMM_SET_MCCONF_TEMP "+String(canId));
+	}
+	int32_t index = 0;
+	int payloadSize = (canId == 0 ? 11 : 13);
+	uint8_t payload[payloadSize];
+
+	if (canId != 0) {
+		payload[index++] = { COMM_FORWARD_CAN };
+		payload[index++] = canId;
+	}
+	payload[index++] = { COMM_SET_MCCONF_TEMP };
+	payload[index++] = mcconf.currentMin; 	    // mcconf->l_current_min_scale
+    payload[index++] = mcconf.currentMax; 	    // mcconf->l_current_max_scale
+    payload[index++] = mcconf.erpmMin;  	    // mcconf->l_min_erpm //todo: check if we want to use SETUP command which has a speed calculation
+    payload[index++] = mcconf.erpmMax;      	// mcconf->l_max_erpm
+    payload[index++] = mcconf.dutyMin;      	// mcconf->l_min_duty
+    payload[index++] = mcconf.dutyMax;      	// mcconf->l_max_duty
+    payload[index++] = mcconf.wattMin;      	// mcconf->l_watt_min //todo: do we need to multiply by controller_num?
+    payload[index++] = mcconf.wattMax;      	// mcconf->l_watt_max
+    payload[index++] = mcconf.inCurrentMin; 	// mcconf->l_in_current_min
+    payload[index++] = mcconf.inCurrentMax; 	// mcconf->l_in_current_max
+
+//    payload[index++] = mcconf.motorPoles;       // mcconf->si_motor_poles todo: it appears that this part is not sent back, confirm?
+//    payload[index++] = mcconf.gearRatio; 	    // mcconf->si_gear_ratio
+//    payload[index++] = mcconf.wheelDiameter; 	// mcconf->si_wheel_diameter
 
 	packSendPayload(payload, payloadSize);
 }
