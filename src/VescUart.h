@@ -43,7 +43,7 @@ class VescUart
     };
 
     /** Struct to hold the McConf values to send over UART */
-    struct McConfPackage(){
+    struct McConfPackage {
         float currentMin;
         float currentMax;
         float erpmMin;
@@ -57,7 +57,7 @@ class VescUart
         int motorPoles;
         float gearRatio;
         float wheelDiameter;
-    }
+    };
 
 	//Timeout - specifies how long the function will wait for the vesc to respond
 	const uint32_t _TIMEOUT;
@@ -131,6 +131,29 @@ class VescUart
          * @param      canId  - The CAN ID of the VESC
          */
         void setNunchuckValues(uint8_t canId);
+
+        /**
+         * @brief      Sends a command to VESC and stores the MCCONF_TEMP data
+         *
+         * @return     True if successfull otherwise false
+         */
+        bool getMcConfValues(void);
+        /**
+         * @brief      Sends a command to VESC and stores the MCCONF_TEMP data
+         * @param      canId  - The CAN ID of the VESC
+         *
+         * @return     True if successfull otherwise false
+         */
+        bool getMcConfValues(uint8_t canId);
+        /**
+         * @brief      Sends values for MCCONF_TEMP to VESC for temporary overriding of settings
+         */
+        void setMcConfValues(void);
+        /**
+         * @brief      Sends values for MCCONF_TEMP to VESC for temporary overriding of settings
+         * @param      canId  - The CAN ID of the VESC
+         */
+        void setMcConfValues(uint8_t canId);  
 
         /**
          * @brief      Set the current to drive the motor
