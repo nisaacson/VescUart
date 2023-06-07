@@ -276,6 +276,17 @@ class VescUart
 		 */
 		void serialPrint(uint8_t * data, int len);
 
+        /**
+		 * @brief      Helper function to send a "get values" command to the VESC
+		 *
+		 * @param      canId                    - The CAN ID of the VESC
+		 * @param      packetId                 - Packet ID to request
+         * @param      expectedMessageLength    - Minimum number of bytes needed to be received for parsing
+         * @param      packetIdStr              - String of packetId
+		 */
+        bool getValues(uint8_t canId, COMM_PACKET_ID packetId, int expectedMessageLength, const char *packetIdStr);
+
+
 };
 
 #endif

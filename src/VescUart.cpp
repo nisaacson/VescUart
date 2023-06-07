@@ -271,14 +271,9 @@ bool VescUart::getFWversion(uint8_t canId){
 	return false;
 }
 
-bool VescUart::getVescValues(void) {
-	return getVescValues(0);
-}
-
-bool VescUart::getVescValues(uint8_t canId) {
-
+bool VescUart::getValues(uint8_t canId, COMM_PACKET_ID packetId, int expectedMessageLength, const char *packetIdStr) {
 	if (debugPort!=NULL){
-		debugPort->println("Command: COMM_GET_VALUES "+String(canId));
+		debugPort->println("Command: "+String(packetIdStr)+" "+String(canId));
 	}
 
 	int32_t index = 0;
@@ -288,17 +283,25 @@ bool VescUart::getVescValues(uint8_t canId) {
 		payload[index++] = { COMM_FORWARD_CAN };
 		payload[index++] = canId;
 	}
-	payload[index++] = { COMM_GET_VALUES };
+	payload[index++] = { packetId };
 
 	packSendPayload(payload, payloadSize);
 
 	uint8_t message[256];
 	int messageLength = receiveUartMessage(message);
 
-	if (messageLength > 55) {
+	if (messageLength >= expectedMessageLength) {
 		return processReadPacket(message); 
 	}
 	return false;
+}
+
+bool VescUart::getVescValues(void) {
+	return getVescValues(0);
+}
+
+bool VescUart::getVescValues(uint8_t canId) {
+	return getValues(canId, COMM_GET_VALUES, 56, "COMM_GET_VALUES");
 }
 void VescUart::setNunchuckValues() {
 	return setNunchuckValues(0);
@@ -344,29 +347,7 @@ bool VescUart::getMcConfValues(void) {
 }
 
 bool VescUart::getMcConfValues(uint8_t canId) {
-
-	if (debugPort!=NULL){
-		debugPort->println("Command: COMM_GET_MCCONF_TEMP "+String(canId));
-	}
-
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 1 : 3);
-	uint8_t payload[payloadSize];
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_GET_MCCONF_TEMP };
-
-	packSendPayload(payload, payloadSize);
-
-	uint8_t message[256];
-	int messageLength = receiveUartMessage(message);
-
-	if (messageLength > 49) {
-		return processReadPacket(message);
-	}
-	return false;
+	return getValues(canId, COMM_GET_MCCONF_TEMP, 50, "COMM_GET_MCCONF_TEMP");
 }
 void VescUart::setMcConfValues() {
 	return setMcConfValues(0);
