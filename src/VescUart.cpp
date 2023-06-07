@@ -363,7 +363,7 @@ bool VescUart::getMcConfValues(uint8_t canId) {
 	uint8_t message[256];
 	int messageLength = receiveUartMessage(message);
 
-	if (messageLength > 55) {
+	if (messageLength > 49) {
 		return processReadPacket(message);
 	}
 	return false;
