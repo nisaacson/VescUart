@@ -59,6 +59,31 @@ class VescUart
         float wheelDiameter;
     };
 
+    struct ValuesSetupPackage {
+        float           tempMosfet;
+        float           tempMotor;
+        float           motorCurrent;
+        float           inputCurrent;
+        float           dutyCycleNow;
+        float           rpm;
+        float           speed;
+        float           inpVoltage;
+        float           batteryLevel;
+        float           ampHours;
+        float           ampHoursCharged;
+        float           wattHours;
+        float           wattHoursCharged;
+        float           distance;
+        float           distanceAbs;
+        float           pidPos;
+        mc_fault_code   error;
+        uint8_t         id;
+        uint8_t         numVescs;
+        float           wattHoursLeft;
+        uint32_t        odometer;
+        uint32_t        uptimeMs;
+    };
+
 	//Timeout - specifies how long the function will wait for the vesc to respond
 	const uint32_t _TIMEOUT;
 
@@ -74,11 +99,14 @@ class VescUart
 		/** Variable to hold nunchuck values */
 		nunchuckPackage nunchuck; 
 
-       /** Variable to hold firmware version */
+        /** Variable to hold firmware version */
         FWversionPackage fw_version;
 
-       /** Variable to hold McConf values */
+        /** Variable to hold McConf values */
         McConfPackage mcconf;
+
+        /** Variable to hold ValuesSetup values */
+        ValuesSetupPackage valuesSetup;
 
         /**
          * @brief      Set the serial port for uart communication
@@ -121,6 +149,21 @@ class VescUart
          * @return     True if successfull otherwise false
          */
         bool getVescValues(uint8_t canId);
+
+        /**
+         * @brief      Sends a command to VESC and stores the VALUES_SETUP data
+         *
+         * @return     True if successfull otherwise false
+         */
+        bool getSetupValues(void);
+
+        /**
+         * @brief      Sends a command to VESC and stores the VALUES_SETUP data
+         * @param      canId  - The CAN ID of the VESC
+         *
+         * @return     True if successfull otherwise false
+         */
+        bool getSetupValues(uint8_t canId);
 
         /**
          * @brief      Sends values for joystick and buttons to the nunchuck app
