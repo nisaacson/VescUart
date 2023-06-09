@@ -259,6 +259,14 @@ bool VescUart::processReadPacket(uint8_t * message) {
 
 			return true;
 
+		case COMM_GET_DECODED_ADC:
+			decodedAdc.decodedLevel		= buffer_get_int32(message, &index);	// app_adc_get_decoded_level
+			decodedAdc.voltage			= buffer_get_int32(message, &index);	// app_adc_get_voltage
+			decodedAdc.decodedLevel2	= buffer_get_int32(message, &index);	// app_adc_get_decoded_level2
+			decodedAdc.voltage2			= buffer_get_int32(message, &index);	// app_adc_get_voltage2
+			
+			return true;
+
 		break;
 
 		/* case COMM_GET_VALUES_SELECTIVE:
@@ -339,6 +347,14 @@ bool VescUart::getSetupValues(void) {
 
 bool VescUart::getSetupValues(uint8_t canId) {
 	return getValues(canId, COMM_GET_VALUES_SETUP, 70, "COMM_GET_VALUES_SETUP");
+}
+
+bool VescUart::getDecodedAdcValues(void) {
+	return getDecodedAdcValues(0);
+}
+
+bool VescUart::getDecodedAdcValues(uint8_t canId) {
+	return getValues(canId, COMM_GET_DECODED_ADC, 16, "COMM_GET_DECODED_ADC");
 }
 
 void VescUart::setNunchuckValues() {

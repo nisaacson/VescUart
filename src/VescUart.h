@@ -84,6 +84,13 @@ class VescUart
         uint32_t        uptimeMs;
     };
 
+    struct DecodedAdcPackage {
+        int32_t decodedLevel;   // 0-1000000
+        int32_t voltage;        // µV?
+        int32_t decodedLevel2;
+        int32_t voltage2;
+    };
+
 	//Timeout - specifies how long the function will wait for the vesc to respond
 	const uint32_t _TIMEOUT;
 
@@ -107,6 +114,9 @@ class VescUart
 
         /** Variable to hold ValuesSetup values */
         ValuesSetupPackage valuesSetup;
+        
+        /** Variable to hold ValuesSetup values */
+        DecodedAdcPackage decodedAdc;
 
         /**
          * @brief      Set the serial port for uart communication
@@ -164,6 +174,21 @@ class VescUart
          * @return     True if successfull otherwise false
          */
         bool getSetupValues(uint8_t canId);
+
+        /**
+         * @brief      Sends a command to VESC and stores the DECODED_ADC data
+         *
+         * @return     True if successfull otherwise false
+         */
+        bool getDecodedAdcValues(void);
+
+        /**
+         * @brief      Sends a command to VESC and stores the DECODED_ADC data
+         * @param      canId  - The CAN ID of the VESC
+         *
+         * @return     True if successfull otherwise false
+         */
+        bool getDecodedAdcValues(uint8_t canId);
 
         /**
          * @brief      Sends values for joystick and buttons to the nunchuck app
