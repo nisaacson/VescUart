@@ -233,6 +233,40 @@ bool VescUart::processReadPacket(uint8_t * message) {
 
             return true;
 
+		case COMM_GET_VALUES_SETUP: // Structure defined here: https://github.com/vedderb/bldc/blob/6578a642d1997a9ccf215d41a6fe012fa2305af7/comm/commands.c#L868
+			valuesSetup.tempMosfet = 		buffer_get_float16(message, 1e1, &index);		// mc_interface_temp_fet_filtered
+			valuesSetup.tempMotor = 		buffer_get_float16(message, 1e1, &index);		// mc_interface_temp_motor_filtered
+			valuesSetup.motorCurrent = 		buffer_get_float32(message, 1e2, &index);		// mc_interface_get_tot_current_filtered
+			valuesSetup.inputCurrent = 		buffer_get_float32(message, 1e2, &index);		// mc_interface_get_tot_current_in_filtered
+			valuesSetup.dutyCycleNow = 		buffer_get_float16(message, 1e3, &index);		// mc_interface_get_duty_cycle_now
+			valuesSetup.rpm = 				buffer_get_float32(message, 1e0, &index);		// mc_interface_get_rpm
+			valuesSetup.speed = 			buffer_get_float32(message, 1e3, &index);		// mc_interface_get_speed
+			valuesSetup.inpVoltage = 		buffer_get_float16(message, 1e1, &index);		// mc_interface_get_input_voltage_filtered
+			valuesSetup.batteryLevel = 		buffer_get_float16(message, 1e3, &index);		// mc_interface_get_battery_level
+			valuesSetup.ampHours =			buffer_get_float32(message, 1e4, &index);		// mc_interface_get_amp_hours
+			valuesSetup.ampHoursCharged = 	buffer_get_float32(message, 1e4, &index);		// mc_interface_get_amp_hours_charged
+			valuesSetup.wattHours = 		buffer_get_float32(message, 1e4, &index);		// mc_interface_get_watt_hours
+			valuesSetup.wattHoursCharged =	buffer_get_float32(message, 1e4, &index);		// mc_interface_get_watt_hours_charged
+			valuesSetup.distance = 			buffer_get_float32(message, 1e3, &index);		// mc_interface_get_distance
+			valuesSetup.distanceAbs = 		buffer_get_float32(message, 1e3, &index);		// mc_interface_get_distance_abs
+			valuesSetup.pidPos = 			buffer_get_float32(message, 1e6, &index);		// mc_interface_get_pid_pos_now
+			valuesSetup.error = 			(mc_fault_code)message[index++];				// mc_interface_get_fault
+			valuesSetup.id = 				message[index++];								// app_get_configuration()->controller_id
+			valuesSetup.numVescs = 			message[index++];								// mc_interface_get_setup_values().num_vescs
+			valuesSetup.wattHoursLeft = 	buffer_get_float32(message, 1e3, &index);		// mc_interface_get_battery_level
+			valuesSetup.odometer = 			buffer_get_uint32(message, &index);				// mc_interface_get_odometer
+			valuesSetup.uptimeMs = 			buffer_get_uint32(message, &index);				// chVTGetSystemTimeX
+
+			return true;
+
+		case COMM_GET_DECODED_ADC:
+			decodedAdc.decodedLevel		= buffer_get_int32(message, &index);	// app_adc_get_decoded_level
+			decodedAdc.voltage			= buffer_get_int32(message, &index);	// app_adc_get_voltage
+			decodedAdc.decodedLevel2	= buffer_get_int32(message, &index);	// app_adc_get_decoded_level2
+			decodedAdc.voltage2			= buffer_get_int32(message, &index);	// app_adc_get_voltage2
+			
+			return true;
+
 		break;
 
 		/* case COMM_GET_VALUES_SELECTIVE:
@@ -271,14 +305,9 @@ bool VescUart::getFWversion(uint8_t canId){
 	return false;
 }
 
-bool VescUart::getVescValues(void) {
-	return getVescValues(0);
-}
-
-bool VescUart::getVescValues(uint8_t canId) {
-
+bool VescUart::getValues(uint8_t canId, COMM_PACKET_ID packetId, int expectedMessageLength, const char *packetIdStr) {
 	if (debugPort!=NULL){
-		debugPort->println("Command: COMM_GET_VALUES "+String(canId));
+		debugPort->println("Command: "+String(packetIdStr)+" "+String(canId));
 	}
 
 	int32_t index = 0;
@@ -288,18 +317,46 @@ bool VescUart::getVescValues(uint8_t canId) {
 		payload[index++] = { COMM_FORWARD_CAN };
 		payload[index++] = canId;
 	}
-	payload[index++] = { COMM_GET_VALUES };
+	payload[index++] = { packetId };
 
 	packSendPayload(payload, payloadSize);
 
 	uint8_t message[256];
 	int messageLength = receiveUartMessage(message);
 
-	if (messageLength > 55) {
+	if (messageLength >= expectedMessageLength) {
 		return processReadPacket(message); 
+	}
+	else if (debugPort!=NULL) {
+		debugPort->println("Error! Received too few bytes ("+String(messageLength)+"). Expected: "+String(expectedMessageLength));
 	}
 	return false;
 }
+
+bool VescUart::getVescValues(void) {
+	return getVescValues(0);
+}
+
+bool VescUart::getVescValues(uint8_t canId) {
+	return getValues(canId, COMM_GET_VALUES, 56, "COMM_GET_VALUES");
+}
+
+bool VescUart::getSetupValues(void) {
+	return getSetupValues(0);
+}
+
+bool VescUart::getSetupValues(uint8_t canId) {
+	return getValues(canId, COMM_GET_VALUES_SETUP, 70, "COMM_GET_VALUES_SETUP");
+}
+
+bool VescUart::getDecodedAdcValues(void) {
+	return getDecodedAdcValues(0);
+}
+
+bool VescUart::getDecodedAdcValues(uint8_t canId) {
+	return getValues(canId, COMM_GET_DECODED_ADC, 16, "COMM_GET_DECODED_ADC");
+}
+
 void VescUart::setNunchuckValues() {
 	return setNunchuckValues(0);
 }
@@ -344,29 +401,7 @@ bool VescUart::getMcConfValues(void) {
 }
 
 bool VescUart::getMcConfValues(uint8_t canId) {
-
-	if (debugPort!=NULL){
-		debugPort->println("Command: COMM_GET_MCCONF_TEMP "+String(canId));
-	}
-
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 1 : 3);
-	uint8_t payload[payloadSize];
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_GET_MCCONF_TEMP };
-
-	packSendPayload(payload, payloadSize);
-
-	uint8_t message[256];
-	int messageLength = receiveUartMessage(message);
-
-	if (messageLength > 55) {
-		return processReadPacket(message);
-	}
-	return false;
+	return getValues(canId, COMM_GET_MCCONF_TEMP, 50, "COMM_GET_MCCONF_TEMP");
 }
 void VescUart::setMcConfValues() {
 	return setMcConfValues(0);
