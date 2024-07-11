@@ -1,557 +1,645 @@
-#include <stdint.h>
 #include "VescUart.h"
 
+#include <stdint.h>
+
 VescUart::VescUart(uint32_t timeout_ms) : _TIMEOUT(timeout_ms) {
-	nunchuck.valueX         = 127;
-	nunchuck.valueY         = 127;
-	nunchuck.lowerButton  	= false;
-	nunchuck.upperButton  	= false;
+  nunchuck.valueX = 127;
+  nunchuck.valueY = 127;
+  nunchuck.lowerButton = false;
+  nunchuck.upperButton = false;
 }
 
-void VescUart::setSerialPort(Stream* port)
-{
-	serialPort = port;
+void VescUart::setSerialPort(Stream* port) { serialPort = port; }
+
+void VescUart::setDebugPort(Stream* port) { debugPort = port; }
+
+int VescUart::receiveUartMessage(uint8_t* payloadReceived) {
+  // Messages <= 255 starts with "2", 2nd byte is length
+  // Messages > 255 starts with "3" 2nd and 3rd byte is length combined with 1st
+  // >>8 and then &0xFF
+
+  // Makes no sense to run this function if no serialPort is defined.
+  if (serialPort == NULL) return -1;
+
+  uint16_t counter = 0;
+  uint16_t endMessage = 256;
+  bool messageRead = false;
+  uint8_t messageReceived[256];
+  uint16_t lenPayload = 0;
+
+  uint32_t timeout =
+      millis() +
+      _TIMEOUT;  // Defining the timestamp for timeout (100ms before timeout)
+
+  while (millis() < timeout && messageRead == false) {
+    while (serialPort->available()) {
+      messageReceived[counter++] = serialPort->read();
+
+      if (counter == 2) {
+        switch (messageReceived[0]) {
+          case 2:
+            endMessage = messageReceived[1] +
+                         5;  // Payload size + 2 for sice + 3 for SRC and End.
+            lenPayload = messageReceived[1];
+            break;
+
+          case 3:
+            // ToDo: Add Message Handling > 255 (starting with 3)
+            if (debugPort != NULL) {
+              debugPort->println(
+                  "Message is larger than 256 bytes - not supported");
+            }
+            break;
+
+          default:
+            if (debugPort != NULL) {
+              debugPort->println("Unvalid start bit");
+            }
+            break;
+        }
+      }
+
+      if (counter >= sizeof(messageReceived)) {
+        break;
+      }
+
+      if (counter == endMessage && messageReceived[endMessage - 1] == 3) {
+        messageReceived[endMessage] = 0;
+        if (debugPort != NULL) {
+          debugPort->println("End of message reached!");
+        }
+        messageRead = true;
+        break;  // Exit if end of message is reached, even if there is still
+                // more data in the buffer.
+      }
+    }
+  }
+  if (messageRead == false && debugPort != NULL) {
+    debugPort->println("Timeout");
+  }
+
+  bool unpacked = false;
+
+  if (messageRead) {
+    unpacked = unpackPayload(messageReceived, endMessage, payloadReceived);
+  }
+
+  if (unpacked) {
+    // Message was read
+    return lenPayload;
+  } else {
+    // No Message Read
+    return 0;
+  }
 }
 
-void VescUart::setDebugPort(Stream* port)
-{
-	debugPort = port;
+bool VescUart::unpackPayload(uint8_t* message, int lenMes, uint8_t* payload) {
+  uint16_t crcMessage = 0;
+  uint16_t crcPayload = 0;
+
+  // Rebuild crc:
+  crcMessage = message[lenMes - 3] << 8;
+  crcMessage &= 0xFF00;
+  crcMessage += message[lenMes - 2];
+
+  if (debugPort != NULL) {
+    debugPort->print("SRC received: ");
+    debugPort->println(crcMessage);
+  }
+
+  // Extract payload:
+  memcpy(payload, &message[2], message[1]);
+
+  crcPayload = crc16(payload, message[1]);
+
+  if (debugPort != NULL) {
+    debugPort->print("SRC calc: ");
+    debugPort->println(crcPayload);
+  }
+
+  if (crcPayload == crcMessage) {
+    if (debugPort != NULL) {
+      debugPort->print("Received: ");
+      serialPrint(message, lenMes);
+      debugPort->println();
+
+      debugPort->print("Payload :      ");
+      serialPrint(payload, message[1] - 1);
+      debugPort->println();
+    }
+
+    return true;
+  } else {
+    return false;
+  }
 }
 
-int VescUart::receiveUartMessage(uint8_t * payloadReceived) {
+int VescUart::packSendPayload(uint8_t* payload, int lenPay) {
+  uint16_t crcPayload = crc16(payload, lenPay);
+  int count = 0;
+  uint8_t messageSend[256];
 
-	// Messages <= 255 starts with "2", 2nd byte is length
-	// Messages > 255 starts with "3" 2nd and 3rd byte is length combined with 1st >>8 and then &0xFF
+  if (lenPay <= 256) {
+    messageSend[count++] = 2;
+    messageSend[count++] = lenPay;
+  } else {
+    messageSend[count++] = 3;
+    messageSend[count++] = (uint8_t)(lenPay >> 8);
+    messageSend[count++] = (uint8_t)(lenPay & 0xFF);
+  }
 
-	// Makes no sense to run this function if no serialPort is defined.
-	if (serialPort == NULL)
-		return -1;
+  memcpy(messageSend + count, payload, lenPay);
+  count += lenPay;
 
-	uint16_t counter = 0;
-	uint16_t endMessage = 256;
-	bool messageRead = false;
-	uint8_t messageReceived[256];
-	uint16_t lenPayload = 0;
-	
-	uint32_t timeout = millis() + _TIMEOUT; // Defining the timestamp for timeout (100ms before timeout)
+  messageSend[count++] = (uint8_t)(crcPayload >> 8);
+  messageSend[count++] = (uint8_t)(crcPayload & 0xFF);
+  messageSend[count++] = 3;
+  // messageSend[count] = NULL;
 
-	while ( millis() < timeout && messageRead == false) {
+  if (debugPort != NULL) {
+    debugPort->print("Package to send: ");
+    serialPrint(messageSend, count);
+  }
 
-		while (serialPort->available()) {
+  // Sending package
+  if (serialPort != NULL) serialPort->write(messageSend, count);
 
-			messageReceived[counter++] = serialPort->read();
-
-			if (counter == 2) {
-
-				switch (messageReceived[0])
-				{
-					case 2:
-						endMessage = messageReceived[1] + 5; //Payload size + 2 for sice + 3 for SRC and End.
-						lenPayload = messageReceived[1];
-					break;
-
-					case 3:
-						// ToDo: Add Message Handling > 255 (starting with 3)
-						if( debugPort != NULL ){
-							debugPort->println("Message is larger than 256 bytes - not supported");
-						}
-					break;
-
-					default:
-						if( debugPort != NULL ){
-							debugPort->println("Unvalid start bit");
-						}
-					break;
-				}
-			}
-
-			if (counter >= sizeof(messageReceived)) {
-				break;
-			}
-
-			if (counter == endMessage && messageReceived[endMessage - 1] == 3) {
-				messageReceived[endMessage] = 0;
-				if (debugPort != NULL) {
-					debugPort->println("End of message reached!");
-				}
-				messageRead = true;
-				break; // Exit if end of message is reached, even if there is still more data in the buffer.
-			}
-		}
-	}
-	if(messageRead == false && debugPort != NULL ) {
-		debugPort->println("Timeout");
-	}
-	
-	bool unpacked = false;
-
-	if (messageRead) {
-		unpacked = unpackPayload(messageReceived, endMessage, payloadReceived);
-	}
-
-	if (unpacked) {
-		// Message was read
-		return lenPayload; 
-	}
-	else {
-		// No Message Read
-		return 0;
-	}
+  // Returns number of send bytes
+  return count;
 }
 
+bool VescUart::processReadPacket(uint8_t* message) {
+  COMM_PACKET_ID packetId;
+  int32_t index = 0;
 
-bool VescUart::unpackPayload(uint8_t * message, int lenMes, uint8_t * payload) {
+  packetId = (COMM_PACKET_ID)message[0];
+  message++;  // Removes the packetId from the actual message (payload)
 
-	uint16_t crcMessage = 0;
-	uint16_t crcPayload = 0;
+  switch (packetId) {
+    case COMM_FW_VERSION:  // Structure defined here:
+                           // https://github.com/vedderb/bldc/blob/43c3bbaf91f5052a35b75c2ff17b5fe99fad94d1/commands.c#L164
 
-	// Rebuild crc:
-	crcMessage = message[lenMes - 3] << 8;
-	crcMessage &= 0xFF00;
-	crcMessage += message[lenMes - 2];
+      fw_version.major = message[index++];
+      fw_version.minor = message[index++];
+      return true;
+    case COMM_GET_VALUES:  // Structure defined here:
+                           // https://github.com/vedderb/bldc/blob/43c3bbaf91f5052a35b75c2ff17b5fe99fad94d1/commands.c#L164
 
-	if(debugPort!=NULL){
-		debugPort->print("SRC received: "); debugPort->println(crcMessage);
-	}
+      data.tempMosfet = buffer_get_float16(
+          message, 10.0, &index);  // 2 bytes - mc_interface_temp_fet_filtered()
+      data.tempMotor = buffer_get_float16(
+          message, 10.0,
+          &index);  // 2 bytes - mc_interface_temp_motor_filtered()
+      data.avgMotorCurrent = buffer_get_float32(
+          message, 100.0,
+          &index);  // 4 bytes - mc_interface_read_reset_avg_motor_current()
+      data.avgInputCurrent = buffer_get_float32(
+          message, 100.0,
+          &index);  // 4 bytes - mc_interface_read_reset_avg_input_current()
+      index += 4;   // Skip 4 bytes - mc_interface_read_reset_avg_id()
+      index += 4;   // Skip 4 bytes - mc_interface_read_reset_avg_iq()
+      data.dutyCycleNow = buffer_get_float16(
+          message, 1000.0,
+          &index);  // 2 bytes - mc_interface_get_duty_cycle_now()
+      data.rpm = buffer_get_float32(
+          message, 1.0, &index);  // 4 bytes - mc_interface_get_rpm()
+      data.inpVoltage = buffer_get_float16(
+          message, 10.0, &index);  // 2 bytes - GET_INPUT_VOLTAGE()
+      data.ampHours = buffer_get_float32(
+          message, 10000.0,
+          &index);  // 4 bytes - mc_interface_get_amp_hours(false)
+      data.ampHoursCharged = buffer_get_float32(
+          message, 10000.0,
+          &index);  // 4 bytes - mc_interface_get_amp_hours_charged(false)
+      data.wattHours = buffer_get_float32(
+          message, 10000.0,
+          &index);  // 4 bytes - mc_interface_get_watt_hours(false)
+      data.wattHoursCharged = buffer_get_float32(
+          message, 10000.0,
+          &index);  // 4 bytes - mc_interface_get_watt_hours_charged(false)
+      data.tachometer = buffer_get_int32(
+          message,
+          &index);  // 4 bytes - mc_interface_get_tachometer_value(false)
+      data.tachometerAbs = buffer_get_int32(
+          message,
+          &index);  // 4 bytes - mc_interface_get_tachometer_abs_value(false)
+      data.error = (mc_fault_code)
+          message[index++];  // 1 byte  - mc_interface_get_fault()
+      data.pidPos = buffer_get_float32(
+          message, 1000000.0,
+          &index);  // 4 bytes - mc_interface_get_pid_pos_now()
+      data.id =
+          message[index++];  // 1 byte  - app_get_configuration()->controller_id
 
-	// Extract payload:
-	memcpy(payload, &message[2], message[1]);
+      return true;
 
-	crcPayload = crc16(payload, message[1]);
+    case COMM_GET_MCCONF_TEMP:  // Structure defined here:
+                                // https://github.com/vedderb/bldc/blob/6578a642d1997a9ccf215d41a6fe012fa2305af7/comm/commands.c#L1051
+      mcconf.currentMin = buffer_get_float32_auto(
+          message, &index);  // mcconf->l_current_min_scale
+      mcconf.currentMax = buffer_get_float32_auto(
+          message, &index);  // mcconf->l_current_max_scale
+      mcconf.erpmMin =
+          buffer_get_float32_auto(message, &index);  // mcconf->l_min_erpm
+      mcconf.erpmMax =
+          buffer_get_float32_auto(message, &index);  // mcconf->l_max_erpm
+      mcconf.dutyMin =
+          buffer_get_float32_auto(message, &index);  // mcconf->l_min_duty
+      mcconf.dutyMax =
+          buffer_get_float32_auto(message, &index);  // mcconf->l_max_duty
+      mcconf.wattMin =
+          buffer_get_float32_auto(message, &index);  // mcconf->l_watt_min
+      mcconf.wattMax =
+          buffer_get_float32_auto(message, &index);  // mcconf->l_watt_max
+      mcconf.inCurrentMin =
+          buffer_get_float32_auto(message, &index);  // mcconf->l_in_current_min
+      mcconf.inCurrentMax =
+          buffer_get_float32_auto(message, &index);  // mcconf->l_in_current_max
 
-	if( debugPort != NULL ){
-		debugPort->print("SRC calc: "); debugPort->println(crcPayload);
-	}
-	
-	if (crcPayload == crcMessage) {
-		if( debugPort != NULL ) {
-			debugPort->print("Received: "); 
-			serialPrint(message, lenMes); debugPort->println();
+      mcconf.motorPoles = (uint8_t)message[index++];  // mcconf->si_motor_poles
+      mcconf.gearRatio =
+          buffer_get_float32_auto(message, &index);  // mcconf->si_gear_ratio
+      mcconf.wheelDiameter = buffer_get_float32_auto(
+          message, &index);  // mcconf->si_wheel_diameter
 
-			debugPort->print("Payload :      ");
-			serialPrint(payload, message[1] - 1); debugPort->println();
-		}
+      return true;
 
-		return true;
-	}else{
-		return false;
-	}
+    case COMM_GET_VALUES_SETUP:  // Structure defined here:
+                                 // https://github.com/vedderb/bldc/blob/6578a642d1997a9ccf215d41a6fe012fa2305af7/comm/commands.c#L868
+      valuesSetup.tempMosfet = buffer_get_float16(
+          message, 1e1, &index);  // mc_interface_temp_fet_filtered
+      valuesSetup.tempMotor = buffer_get_float16(
+          message, 1e1, &index);  // mc_interface_temp_motor_filtered
+      valuesSetup.motorCurrent = buffer_get_float32(
+          message, 1e2, &index);  // mc_interface_get_tot_current_filtered
+      valuesSetup.inputCurrent = buffer_get_float32(
+          message, 1e2, &index);  // mc_interface_get_tot_current_in_filtered
+      valuesSetup.dutyCycleNow = buffer_get_float16(
+          message, 1e3, &index);  // mc_interface_get_duty_cycle_now
+      valuesSetup.rpm =
+          buffer_get_float32(message, 1e0, &index);  // mc_interface_get_rpm
+      valuesSetup.speed =
+          buffer_get_float32(message, 1e3, &index);  // mc_interface_get_speed
+      valuesSetup.inpVoltage = buffer_get_float16(
+          message, 1e1, &index);  // mc_interface_get_input_voltage_filtered
+      valuesSetup.batteryLevel = buffer_get_float16(
+          message, 1e3, &index);  // mc_interface_get_battery_level
+      valuesSetup.ampHours = buffer_get_float32(
+          message, 1e4, &index);  // mc_interface_get_amp_hours
+      valuesSetup.ampHoursCharged = buffer_get_float32(
+          message, 1e4, &index);  // mc_interface_get_amp_hours_charged
+      valuesSetup.wattHours = buffer_get_float32(
+          message, 1e4, &index);  // mc_interface_get_watt_hours
+      valuesSetup.wattHoursCharged = buffer_get_float32(
+          message, 1e4, &index);  // mc_interface_get_watt_hours_charged
+      valuesSetup.distance = buffer_get_float32(
+          message, 1e3, &index);  // mc_interface_get_distance
+      valuesSetup.distanceAbs = buffer_get_float32(
+          message, 1e3, &index);  // mc_interface_get_distance_abs
+      valuesSetup.pidPos = buffer_get_float32(
+          message, 1e6, &index);  // mc_interface_get_pid_pos_now
+      valuesSetup.error =
+          (mc_fault_code)message[index++];  // mc_interface_get_fault
+      valuesSetup.id =
+          message[index++];  // app_get_configuration()->controller_id
+      valuesSetup.numVescs =
+          message[index++];  // mc_interface_get_setup_values().num_vescs
+      valuesSetup.wattHoursLeft = buffer_get_float32(
+          message, 1e3, &index);  // mc_interface_get_battery_level
+      valuesSetup.odometer =
+          buffer_get_uint32(message, &index);  // mc_interface_get_odometer
+      valuesSetup.uptimeMs =
+          buffer_get_uint32(message, &index);  // chVTGetSystemTimeX
+
+      return true;
+
+    case COMM_GET_DECODED_ADC:
+      decodedAdc.decodedLevel =
+          buffer_get_int32(message, &index);  // app_adc_get_decoded_level
+      decodedAdc.voltage =
+          buffer_get_int32(message, &index);  // app_adc_get_voltage
+      decodedAdc.decodedLevel2 =
+          buffer_get_int32(message, &index);  // app_adc_get_decoded_level2
+      decodedAdc.voltage2 =
+          buffer_get_int32(message, &index);  // app_adc_get_voltage2
+
+      return true;
+
+      break;
+
+      /* case COMM_GET_VALUES_SELECTIVE:
+
+              uint32_t mask = 0xFFFFFFFF; */
+
+    default:
+      return false;
+      break;
+  }
 }
 
+bool VescUart::getFWversion(void) { return getFWversion(0); }
 
-int VescUart::packSendPayload(uint8_t * payload, int lenPay) {
+bool VescUart::getFWversion(uint8_t canId) {
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 1 : 3);
+  uint8_t payload[payloadSize];
 
-	uint16_t crcPayload = crc16(payload, lenPay);
-	int count = 0;
-	uint8_t messageSend[256];
-	
-	if (lenPay <= 256)
-	{
-		messageSend[count++] = 2;
-		messageSend[count++] = lenPay;
-	}
-	else
-	{
-		messageSend[count++] = 3;
-		messageSend[count++] = (uint8_t)(lenPay >> 8);
-		messageSend[count++] = (uint8_t)(lenPay & 0xFF);
-	}
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
+  payload[index++] = {COMM_FW_VERSION};
 
-	memcpy(messageSend + count, payload, lenPay);
-	count += lenPay;
+  packSendPayload(payload, payloadSize);
 
-	messageSend[count++] = (uint8_t)(crcPayload >> 8);
-	messageSend[count++] = (uint8_t)(crcPayload & 0xFF);
-	messageSend[count++] = 3;
-	// messageSend[count] = NULL;
-	
-	if(debugPort!=NULL){
-		debugPort->print("Package to send: "); serialPrint(messageSend, count);
-	}
-
-	// Sending package
-	if( serialPort != NULL )
-		serialPort->write(messageSend, count);
-
-	// Returns number of send bytes
-	return count;
+  uint8_t message[256];
+  int messageLength = receiveUartMessage(message);
+  if (messageLength > 0) {
+    return processReadPacket(message);
+  }
+  return false;
 }
 
+bool VescUart::getValues(uint8_t canId, COMM_PACKET_ID packetId,
+                         int expectedMessageLength, const char* packetIdStr) {
+  if (debugPort != NULL) {
+    debugPort->println("Command: " + String(packetIdStr) + " " + String(canId));
+  }
 
-bool VescUart::processReadPacket(uint8_t * message) {
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 1 : 3);
+  uint8_t payload[payloadSize];
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
+  payload[index++] = {packetId};
 
-	COMM_PACKET_ID packetId;
-	int32_t index = 0;
+  packSendPayload(payload, payloadSize);
 
-	packetId = (COMM_PACKET_ID)message[0];
-	message++; // Removes the packetId from the actual message (payload)
+  uint8_t message[256];
+  int messageLength = receiveUartMessage(message);
 
-	switch (packetId){
-		case COMM_FW_VERSION: // Structure defined here: https://github.com/vedderb/bldc/blob/43c3bbaf91f5052a35b75c2ff17b5fe99fad94d1/commands.c#L164
-
-			fw_version.major = message[index++];
-			fw_version.minor = message[index++];
-			return true;
-		case COMM_GET_VALUES: // Structure defined here: https://github.com/vedderb/bldc/blob/43c3bbaf91f5052a35b75c2ff17b5fe99fad94d1/commands.c#L164
-
-			data.tempMosfet 		= buffer_get_float16(message, 10.0, &index); 	// 2 bytes - mc_interface_temp_fet_filtered()
-			data.tempMotor 			= buffer_get_float16(message, 10.0, &index); 	// 2 bytes - mc_interface_temp_motor_filtered()
-			data.avgMotorCurrent 	= buffer_get_float32(message, 100.0, &index); // 4 bytes - mc_interface_read_reset_avg_motor_current()
-			data.avgInputCurrent 	= buffer_get_float32(message, 100.0, &index); // 4 bytes - mc_interface_read_reset_avg_input_current()
-			index += 4; // Skip 4 bytes - mc_interface_read_reset_avg_id()
-			index += 4; // Skip 4 bytes - mc_interface_read_reset_avg_iq()
-			data.dutyCycleNow 		= buffer_get_float16(message, 1000.0, &index); 	// 2 bytes - mc_interface_get_duty_cycle_now()
-			data.rpm 				= buffer_get_float32(message, 1.0, &index);		// 4 bytes - mc_interface_get_rpm()
-			data.inpVoltage 		= buffer_get_float16(message, 10.0, &index);		// 2 bytes - GET_INPUT_VOLTAGE()
-			data.ampHours 			= buffer_get_float32(message, 10000.0, &index);	// 4 bytes - mc_interface_get_amp_hours(false)
-			data.ampHoursCharged 	= buffer_get_float32(message, 10000.0, &index);	// 4 bytes - mc_interface_get_amp_hours_charged(false)
-			data.wattHours			= buffer_get_float32(message, 10000.0, &index);	// 4 bytes - mc_interface_get_watt_hours(false)
-			data.wattHoursCharged	= buffer_get_float32(message, 10000.0, &index);	// 4 bytes - mc_interface_get_watt_hours_charged(false)
-			data.tachometer 		= buffer_get_int32(message, &index);				// 4 bytes - mc_interface_get_tachometer_value(false)
-			data.tachometerAbs 		= buffer_get_int32(message, &index);				// 4 bytes - mc_interface_get_tachometer_abs_value(false)
-			data.error 				= (mc_fault_code)message[index++];								// 1 byte  - mc_interface_get_fault()
-			data.pidPos				= buffer_get_float32(message, 1000000.0, &index);	// 4 bytes - mc_interface_get_pid_pos_now()
-			data.id					= message[index++];								// 1 byte  - app_get_configuration()->controller_id	
-
-			return true;
-
-        case COMM_GET_MCCONF_TEMP: // Structure defined here: https://github.com/vedderb/bldc/blob/6578a642d1997a9ccf215d41a6fe012fa2305af7/comm/commands.c#L1051
-            mcconf.currentMin 		= buffer_get_float32_auto(message, &index); 	// mcconf->l_current_min_scale
-            mcconf.currentMax 		= buffer_get_float32_auto(message, &index); 	// mcconf->l_current_max_scale
-            mcconf.erpmMin 		    = buffer_get_float32_auto(message, &index); 	// mcconf->l_min_erpm
-            mcconf.erpmMax 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_max_erpm
-            mcconf.dutyMin 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_min_duty
-            mcconf.dutyMax 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_max_duty
-            mcconf.wattMin 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_watt_min
-            mcconf.wattMax 	    	= buffer_get_float32_auto(message, &index); 	// mcconf->l_watt_max
-            mcconf.inCurrentMin 	= buffer_get_float32_auto(message, &index); 	// mcconf->l_in_current_min
-            mcconf.inCurrentMax 	= buffer_get_float32_auto(message, &index); 	// mcconf->l_in_current_max
-
-            mcconf.motorPoles       = (uint8_t) message[index++];                   // mcconf->si_motor_poles
-            mcconf.gearRatio 	    = buffer_get_float32_auto(message, &index); 	// mcconf->si_gear_ratio
-            mcconf.wheelDiameter 	= buffer_get_float32_auto(message, &index); 	// mcconf->si_wheel_diameter
-
-            return true;
-
-		case COMM_GET_VALUES_SETUP: // Structure defined here: https://github.com/vedderb/bldc/blob/6578a642d1997a9ccf215d41a6fe012fa2305af7/comm/commands.c#L868
-			valuesSetup.tempMosfet = 		buffer_get_float16(message, 1e1, &index);		// mc_interface_temp_fet_filtered
-			valuesSetup.tempMotor = 		buffer_get_float16(message, 1e1, &index);		// mc_interface_temp_motor_filtered
-			valuesSetup.motorCurrent = 		buffer_get_float32(message, 1e2, &index);		// mc_interface_get_tot_current_filtered
-			valuesSetup.inputCurrent = 		buffer_get_float32(message, 1e2, &index);		// mc_interface_get_tot_current_in_filtered
-			valuesSetup.dutyCycleNow = 		buffer_get_float16(message, 1e3, &index);		// mc_interface_get_duty_cycle_now
-			valuesSetup.rpm = 				buffer_get_float32(message, 1e0, &index);		// mc_interface_get_rpm
-			valuesSetup.speed = 			buffer_get_float32(message, 1e3, &index);		// mc_interface_get_speed
-			valuesSetup.inpVoltage = 		buffer_get_float16(message, 1e1, &index);		// mc_interface_get_input_voltage_filtered
-			valuesSetup.batteryLevel = 		buffer_get_float16(message, 1e3, &index);		// mc_interface_get_battery_level
-			valuesSetup.ampHours =			buffer_get_float32(message, 1e4, &index);		// mc_interface_get_amp_hours
-			valuesSetup.ampHoursCharged = 	buffer_get_float32(message, 1e4, &index);		// mc_interface_get_amp_hours_charged
-			valuesSetup.wattHours = 		buffer_get_float32(message, 1e4, &index);		// mc_interface_get_watt_hours
-			valuesSetup.wattHoursCharged =	buffer_get_float32(message, 1e4, &index);		// mc_interface_get_watt_hours_charged
-			valuesSetup.distance = 			buffer_get_float32(message, 1e3, &index);		// mc_interface_get_distance
-			valuesSetup.distanceAbs = 		buffer_get_float32(message, 1e3, &index);		// mc_interface_get_distance_abs
-			valuesSetup.pidPos = 			buffer_get_float32(message, 1e6, &index);		// mc_interface_get_pid_pos_now
-			valuesSetup.error = 			(mc_fault_code)message[index++];				// mc_interface_get_fault
-			valuesSetup.id = 				message[index++];								// app_get_configuration()->controller_id
-			valuesSetup.numVescs = 			message[index++];								// mc_interface_get_setup_values().num_vescs
-			valuesSetup.wattHoursLeft = 	buffer_get_float32(message, 1e3, &index);		// mc_interface_get_battery_level
-			valuesSetup.odometer = 			buffer_get_uint32(message, &index);				// mc_interface_get_odometer
-			valuesSetup.uptimeMs = 			buffer_get_uint32(message, &index);				// chVTGetSystemTimeX
-
-			return true;
-
-		case COMM_GET_DECODED_ADC:
-			decodedAdc.decodedLevel		= buffer_get_int32(message, &index);	// app_adc_get_decoded_level
-			decodedAdc.voltage			= buffer_get_int32(message, &index);	// app_adc_get_voltage
-			decodedAdc.decodedLevel2	= buffer_get_int32(message, &index);	// app_adc_get_decoded_level2
-			decodedAdc.voltage2			= buffer_get_int32(message, &index);	// app_adc_get_voltage2
-			
-			return true;
-
-		break;
-
-		/* case COMM_GET_VALUES_SELECTIVE:
-
-			uint32_t mask = 0xFFFFFFFF; */
-
-		default:
-			return false;
-		break;
-	}
+  if (messageLength >= expectedMessageLength) {
+    return processReadPacket(message);
+  } else if (debugPort != NULL) {
+    debugPort->println("Error! Received too few bytes (" +
+                       String(messageLength) +
+                       "). Expected: " + String(expectedMessageLength));
+  }
+  return false;
 }
 
-bool VescUart::getFWversion(void){
-	return getFWversion(0);
-}
-
-bool VescUart::getFWversion(uint8_t canId){
-	
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 1 : 3);
-	uint8_t payload[payloadSize];
-	
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_FW_VERSION };
-
-	packSendPayload(payload, payloadSize);
-
-	uint8_t message[256];
-	int messageLength = receiveUartMessage(message);
-	if (messageLength > 0) { 
-		return processReadPacket(message); 
-	}
-	return false;
-}
-
-bool VescUart::getValues(uint8_t canId, COMM_PACKET_ID packetId, int expectedMessageLength, const char *packetIdStr) {
-	if (debugPort!=NULL){
-		debugPort->println("Command: "+String(packetIdStr)+" "+String(canId));
-	}
-
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 1 : 3);
-	uint8_t payload[payloadSize];
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { packetId };
-
-	packSendPayload(payload, payloadSize);
-
-	uint8_t message[256];
-	int messageLength = receiveUartMessage(message);
-
-	if (messageLength >= expectedMessageLength) {
-		return processReadPacket(message); 
-	}
-	else if (debugPort!=NULL) {
-		debugPort->println("Error! Received too few bytes ("+String(messageLength)+"). Expected: "+String(expectedMessageLength));
-	}
-	return false;
-}
-
-bool VescUart::getVescValues(void) {
-	return getVescValues(0);
-}
+bool VescUart::getVescValues(void) { return getVescValues(0); }
 
 bool VescUart::getVescValues(uint8_t canId) {
-	return getValues(canId, COMM_GET_VALUES, 56, "COMM_GET_VALUES");
+  return getValues(canId, COMM_GET_VALUES, 56, "COMM_GET_VALUES");
 }
 
-bool VescUart::getSetupValues(void) {
-	return getSetupValues(0);
-}
+bool VescUart::getSetupValues(void) { return getSetupValues(0); }
 
 bool VescUart::getSetupValues(uint8_t canId) {
-	return getValues(canId, COMM_GET_VALUES_SETUP, 70, "COMM_GET_VALUES_SETUP");
+  return getValues(canId, COMM_GET_VALUES_SETUP, 70, "COMM_GET_VALUES_SETUP");
 }
 
-bool VescUart::getDecodedAdcValues(void) {
-	return getDecodedAdcValues(0);
-}
+bool VescUart::getDecodedAdcValues(void) { return getDecodedAdcValues(0); }
 
 bool VescUart::getDecodedAdcValues(uint8_t canId) {
-	return getValues(canId, COMM_GET_DECODED_ADC, 16, "COMM_GET_DECODED_ADC");
+  return getValues(canId, COMM_GET_DECODED_ADC, 16, "COMM_GET_DECODED_ADC");
 }
 
-void VescUart::setNunchuckValues() {
-	return setNunchuckValues(0);
-}
+void VescUart::setNunchuckValues() { return setNunchuckValues(0); }
 
 void VescUart::setNunchuckValues(uint8_t canId) {
+  if (debugPort != NULL) {
+    debugPort->println("Command: COMM_SET_CHUCK_DATA " + String(canId));
+  }
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 11 : 13);
+  uint8_t payload[payloadSize];
 
-	if(debugPort!=NULL){
-		debugPort->println("Command: COMM_SET_CHUCK_DATA "+String(canId));
-	}	
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 11 : 13);
-	uint8_t payload[payloadSize];
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
+  payload[index++] = {COMM_SET_CHUCK_DATA};
+  payload[index++] = nunchuck.valueX;
+  payload[index++] = nunchuck.valueY;
+  buffer_append_bool(payload, nunchuck.lowerButton, &index);
+  buffer_append_bool(payload, nunchuck.upperButton, &index);
 
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_SET_CHUCK_DATA };
-	payload[index++] = nunchuck.valueX;
-	payload[index++] = nunchuck.valueY;
-	buffer_append_bool(payload, nunchuck.lowerButton, &index);
-	buffer_append_bool(payload, nunchuck.upperButton, &index);
-	
-	// Acceleration Data. Not used, Int16 (2 byte)
-	payload[index++] = 0;
-	payload[index++] = 0;
-	payload[index++] = 0;
-	payload[index++] = 0;
-	payload[index++] = 0;
-	payload[index++] = 0;
+  // Acceleration Data. Not used, Int16 (2 byte)
+  payload[index++] = 0;
+  payload[index++] = 0;
+  payload[index++] = 0;
+  payload[index++] = 0;
+  payload[index++] = 0;
+  payload[index++] = 0;
 
-	if(debugPort != NULL){
-		debugPort->println("Nunchuck Values:");
-		debugPort->print("x="); debugPort->print(nunchuck.valueX); debugPort->print(" y="); debugPort->print(nunchuck.valueY);
-		debugPort->print(" LBTN="); debugPort->print(nunchuck.lowerButton); debugPort->print(" UBTN="); debugPort->println(nunchuck.upperButton);
-	}
+  if (debugPort != NULL) {
+    debugPort->println("Nunchuck Values:");
+    debugPort->print("x=");
+    debugPort->print(nunchuck.valueX);
+    debugPort->print(" y=");
+    debugPort->print(nunchuck.valueY);
+    debugPort->print(" LBTN=");
+    debugPort->print(nunchuck.lowerButton);
+    debugPort->print(" UBTN=");
+    debugPort->println(nunchuck.upperButton);
+  }
 
-	packSendPayload(payload, payloadSize);
+  packSendPayload(payload, payloadSize);
 }
-bool VescUart::getMcConfValues(void) {
-	return getMcConfValues(0);
-}
+bool VescUart::getMcConfValues(void) { return getMcConfValues(0); }
 
 bool VescUart::getMcConfValues(uint8_t canId) {
-	return getValues(canId, COMM_GET_MCCONF_TEMP, 50, "COMM_GET_MCCONF_TEMP");
+  return getValues(canId, COMM_GET_MCCONF_TEMP, 50, "COMM_GET_MCCONF_TEMP");
 }
-void VescUart::setMcConfValues() {
-	return setMcConfValues(0);
-}
+void VescUart::setMcConfValues() { return setMcConfValues(0); }
 
 void VescUart::setMcConfValues(uint8_t canId) {
+  if (debugPort != NULL) {
+    debugPort->println("Command: COMM_SET_MCCONF_TEMP " + String(canId));
+  }
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 11 : 13);
+  uint8_t payload[payloadSize];
 
-	if(debugPort!=NULL){
-		debugPort->println("Command: COMM_SET_MCCONF_TEMP "+String(canId));
-	}
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 11 : 13);
-	uint8_t payload[payloadSize];
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
+  payload[index++] = {COMM_SET_MCCONF_TEMP};
+  payload[index++] = mcconf.currentMin;  // mcconf->l_current_min_scale
+  payload[index++] = mcconf.currentMax;  // mcconf->l_current_max_scale
+  payload[index++] =
+      mcconf.erpmMin;  // mcconf->l_min_erpm //todo: check if we want to use
+                       // SETUP command which has a speed calculation
+  payload[index++] = mcconf.erpmMax;  // mcconf->l_max_erpm
+  payload[index++] = mcconf.dutyMin;  // mcconf->l_min_duty
+  payload[index++] = mcconf.dutyMax;  // mcconf->l_max_duty
+  payload[index++] = mcconf.wattMin;  // mcconf->l_watt_min //todo: do we need
+                                      // to multiply by controller_num?
+  payload[index++] = mcconf.wattMax;  // mcconf->l_watt_max
+  payload[index++] = mcconf.inCurrentMin;  // mcconf->l_in_current_min
+  payload[index++] = mcconf.inCurrentMax;  // mcconf->l_in_current_max
 
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_SET_MCCONF_TEMP };
-	payload[index++] = mcconf.currentMin; 	    // mcconf->l_current_min_scale
-    payload[index++] = mcconf.currentMax; 	    // mcconf->l_current_max_scale
-    payload[index++] = mcconf.erpmMin;  	    // mcconf->l_min_erpm //todo: check if we want to use SETUP command which has a speed calculation
-    payload[index++] = mcconf.erpmMax;      	// mcconf->l_max_erpm
-    payload[index++] = mcconf.dutyMin;      	// mcconf->l_min_duty
-    payload[index++] = mcconf.dutyMax;      	// mcconf->l_max_duty
-    payload[index++] = mcconf.wattMin;      	// mcconf->l_watt_min //todo: do we need to multiply by controller_num?
-    payload[index++] = mcconf.wattMax;      	// mcconf->l_watt_max
-    payload[index++] = mcconf.inCurrentMin; 	// mcconf->l_in_current_min
-    payload[index++] = mcconf.inCurrentMax; 	// mcconf->l_in_current_max
+  //    payload[index++] = mcconf.motorPoles;       // mcconf->si_motor_poles
+  //    todo: it appears that this part is not sent back, confirm?
+  //    payload[index++] = mcconf.gearRatio; 	    // mcconf->si_gear_ratio
+  //    payload[index++] = mcconf.wheelDiameter; 	//
+  //    mcconf->si_wheel_diameter
 
-//    payload[index++] = mcconf.motorPoles;       // mcconf->si_motor_poles todo: it appears that this part is not sent back, confirm?
-//    payload[index++] = mcconf.gearRatio; 	    // mcconf->si_gear_ratio
-//    payload[index++] = mcconf.wheelDiameter; 	// mcconf->si_wheel_diameter
-
-	packSendPayload(payload, payloadSize);
+  packSendPayload(payload, payloadSize);
 }
 
-void VescUart::setCurrent(float current) {
-	return setCurrent(current, 0);
-}
+void VescUart::setCurrent(float current) { return setCurrent(current, 0); }
 
 void VescUart::setCurrent(float current, uint8_t canId) {
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 5 : 7);
-	uint8_t payload[payloadSize];
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_SET_CURRENT };
-	buffer_append_int32(payload, (int32_t)(current * 1000), &index);
-	packSendPayload(payload, payloadSize);
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 5 : 7);
+  uint8_t payload[payloadSize];
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
+  payload[index++] = {COMM_SET_CURRENT};
+  buffer_append_int32(payload, (int32_t)(current * 1000), &index);
+  packSendPayload(payload, payloadSize);
 }
 
 void VescUart::setBrakeCurrent(float brakeCurrent) {
-	return setBrakeCurrent(brakeCurrent, 0);
+  return setBrakeCurrent(brakeCurrent, 0);
 }
 
 void VescUart::setBrakeCurrent(float brakeCurrent, uint8_t canId) {
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 5 : 7);
-	uint8_t payload[payloadSize];
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 5 : 7);
+  uint8_t payload[payloadSize];
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
 
-	payload[index++] = { COMM_SET_CURRENT_BRAKE };
-	buffer_append_int32(payload, (int32_t)(brakeCurrent * 1000), &index);
+  payload[index++] = {COMM_SET_CURRENT_BRAKE};
+  buffer_append_int32(payload, (int32_t)(brakeCurrent * 1000), &index);
 
-	packSendPayload(payload, payloadSize);
+  packSendPayload(payload, payloadSize);
 }
 
-void VescUart::setRPM(float rpm) {
-	return setRPM(rpm, 0);
-}
+void VescUart::setRPM(float rpm) { return setRPM(rpm, 0); }
 
 void VescUart::setRPM(float rpm, uint8_t canId) {
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 5 : 7);
-	uint8_t payload[payloadSize];
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_SET_RPM };
-	buffer_append_int32(payload, (int32_t)(rpm), &index);
-	packSendPayload(payload, payloadSize);
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 5 : 7);
+  uint8_t payload[payloadSize];
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
+  payload[index++] = {COMM_SET_RPM};
+  buffer_append_int32(payload, (int32_t)(rpm), &index);
+  packSendPayload(payload, payloadSize);
 }
 
-void VescUart::setDuty(float duty) {
-	return setDuty(duty, 0);
-}
+void VescUart::setDuty(float duty) { return setDuty(duty, 0); }
 
 void VescUart::setDuty(float duty, uint8_t canId) {
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 5 : 7);
-	uint8_t payload[payloadSize];
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_SET_DUTY };
-	buffer_append_int32(payload, (int32_t)(duty * 100000), &index);
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 5 : 7);
+  uint8_t payload[payloadSize];
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
+  payload[index++] = {COMM_SET_DUTY};
+  buffer_append_int32(payload, (int32_t)(duty * 100000), &index);
 
-	packSendPayload(payload, payloadSize);
+  packSendPayload(payload, payloadSize);
 }
 
-void VescUart::sendKeepalive(void) {
-	return sendKeepalive(0);
-}
+void VescUart::sendKeepalive(void) { return sendKeepalive(0); }
 
 void VescUart::sendKeepalive(uint8_t canId) {
-	int32_t index = 0;
-	int payloadSize = (canId == 0 ? 1 : 3);
-	uint8_t payload[payloadSize];
-	if (canId != 0) {
-		payload[index++] = { COMM_FORWARD_CAN };
-		payload[index++] = canId;
-	}
-	payload[index++] = { COMM_ALIVE };
-	packSendPayload(payload, payloadSize);
+  int32_t index = 0;
+  int payloadSize = (canId == 0 ? 1 : 3);
+  uint8_t payload[payloadSize];
+  if (canId != 0) {
+    payload[index++] = {COMM_FORWARD_CAN};
+    payload[index++] = canId;
+  }
+  payload[index++] = {COMM_ALIVE};
+  packSendPayload(payload, payloadSize);
 }
 
-void VescUart::serialPrint(uint8_t * data, int len) {
-	if(debugPort != NULL){
-		for (int i = 0; i <= len; i++)
-		{
-			debugPort->print(data[i]);
-			debugPort->print(" ");
-		}
-		debugPort->println("");
-	}
+void VescUart::serialPrint(uint8_t* data, int len) {
+  if (debugPort != NULL) {
+    for (int i = 0; i <= len; i++) {
+      debugPort->print(data[i]);
+      debugPort->print(" ");
+    }
+    debugPort->println("");
+  }
 }
 
 void VescUart::printVescValues() {
-	if(debugPort != NULL){
-		debugPort->print("avgMotorCurrent: "); 	debugPort->println(data.avgMotorCurrent);
-		debugPort->print("avgInputCurrent: "); 	debugPort->println(data.avgInputCurrent);
-		debugPort->print("dutyCycleNow: "); 	debugPort->println(data.dutyCycleNow);
-		debugPort->print("rpm: "); 				debugPort->println(data.rpm);
-		debugPort->print("inputVoltage: "); 	debugPort->println(data.inpVoltage);
-		debugPort->print("ampHours: "); 		debugPort->println(data.ampHours);
-		debugPort->print("ampHoursCharged: "); 	debugPort->println(data.ampHoursCharged);
-		debugPort->print("wattHours: "); 		debugPort->println(data.wattHours);
-		debugPort->print("wattHoursCharged: "); debugPort->println(data.wattHoursCharged);
-		debugPort->print("tachometer: "); 		debugPort->println(data.tachometer);
-		debugPort->print("tachometerAbs: "); 	debugPort->println(data.tachometerAbs);
-		debugPort->print("tempMosfet: "); 		debugPort->println(data.tempMosfet);
-		debugPort->print("tempMotor: "); 		debugPort->println(data.tempMotor);
-		debugPort->print("error: "); 			debugPort->println(data.error);
+  if (debugPort != NULL) {
+    debugPort->print("avgMotorCurrent: ");
+    debugPort->println(data.avgMotorCurrent);
+    debugPort->print("avgInputCurrent: ");
+    debugPort->println(data.avgInputCurrent);
+    debugPort->print("dutyCycleNow: ");
+    debugPort->println(data.dutyCycleNow);
+    debugPort->print("rpm: ");
+    debugPort->println(data.rpm);
+    debugPort->print("inputVoltage: ");
+    debugPort->println(data.inpVoltage);
+    debugPort->print("ampHours: ");
+    debugPort->println(data.ampHours);
+    debugPort->print("ampHoursCharged: ");
+    debugPort->println(data.ampHoursCharged);
+    debugPort->print("wattHours: ");
+    debugPort->println(data.wattHours);
+    debugPort->print("wattHoursCharged: ");
+    debugPort->println(data.wattHoursCharged);
+    debugPort->print("tachometer: ");
+    debugPort->println(data.tachometer);
+    debugPort->print("tachometerAbs: ");
+    debugPort->println(data.tachometerAbs);
+    debugPort->print("tempMosfet: ");
+    debugPort->println(data.tempMosfet);
+    debugPort->print("tempMotor: ");
+    debugPort->println(data.tempMotor);
+    debugPort->print("error: ");
+    debugPort->println(data.error);
+  }
+}
+void VescUart::setLocalProfile(bool store, bool forward_can, bool divide_by_controllers, float current_min_rel, float current_max_rel, float speed_max_reverse, float speed_max, float duty_min, float duty_max, float watt_min, float watt_max)
+{
+	int32_t index = 0;
+	uint8_t payload[38];
+
+	bool ack = false;
+
+	payload[index++] = COMM_SET_MCCONF_TEMP_SETUP; //set new profile with speed limitation in m/s
+	payload[index++] = store ? 1 : 0;
+	payload[index++] = forward_can ? 1 : 0;
+	payload[index++] = ack ? 1 : 0;
+	payload[index++] = divide_by_controllers ? 1 : 0;
+
+	buffer_append_float32_auto(payload, current_min_rel, &index);
+	buffer_append_float32_auto(payload, current_max_rel, &index);
+	buffer_append_float32_auto(payload, speed_max_reverse, &index);
+	buffer_append_float32_auto(payload, speed_max, &index);
+	buffer_append_float32_auto(payload, duty_min, &index);
+	buffer_append_float32_auto(payload, duty_max, &index);
+	buffer_append_float32_auto(payload, watt_min, &index);
+	buffer_append_float32_auto(payload, watt_max, &index);
+
+	packSendPayload(payload, 38);
+	if (debugPort != NULL)
+	{
+		debugPort->print("setLocalProfile package send: ");
+		serialPrint(payload, 38);
 	}
 }
